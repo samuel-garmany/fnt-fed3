@@ -97,6 +97,9 @@ void setup() {
   if (!Serial) {
     // The mouse animation acts as a loading bar timeout. Resetting mouseX resets the timer.
     while (mouseX < 200) {
+      if (Serial) {
+        break;
+      }
       if (displayNeedsUpdate) {
         // Erase previous ID text area
         fed3.display.fillRect(10, 48, 140, 20, WHITE);
@@ -186,9 +189,12 @@ void loop() {
   if (fed3.FEDmode == 0) {
     fed3.sessiontype = "Free_feed";                     //The text in "sessiontype" will appear on the screen and in the logfile
     fed3.DisplayPokes = false;                          //Turn off poke indicators for free feeding mode
-    fed3.UpdateDisplay();                               //Update display for free feeding session to remove poke display (they are on by default)
-    fed3.Feed();
-    fed3.Timeout(5);                                    //5s timeout
+    
+    static unsigned long lastFreeFeedTime = 0;
+    if (millis() - lastFreeFeedTime >= 5000) {
+      fed3.Feed();
+      lastFreeFeedTime = millis();
+    }
   }
 
   // Modes 1-3: Fixed Ratio Programs FR1, FR3, FR5
@@ -347,10 +353,13 @@ void loop() {
     fed3.sessiontype = "Timed";                         //The text in "sessiontype" will appear on the screen and in the logfile
     fed3.DisplayPokes = false;                          //Turn off poke indicators for free feeding mode
     fed3.DisplayTimed = true;                           //Display timed feeding info
-    fed3.UpdateDisplay();
+    
     if (fed3.currentHour >= fed3.timedStart && fed3.currentHour < fed3.timedEnd) {
-      fed3.Feed();
-      fed3.Timeout(5);                                  //5s timeout
+      static unsigned long lastTimedFeedTime = 0;
+      if (millis() - lastTimedFeedTime >= 5000) {
+        fed3.Feed();
+        lastTimedFeedTime = millis();
+      }
     }
   }
 
@@ -498,6 +507,16 @@ void loop() {
             Serial.print("CRC32:");
             Serial.println(crc, HEX);
         }
+    }
+    else if (command == "GET_STATUS") {
+        Serial.print("STATUS,FILE:");
+        Serial.print(fed3.filename);
+        Serial.print(",LEFT:");
+        Serial.print(fed3.LeftCount);
+        Serial.print(",RIGHT:");
+        Serial.print(fed3.RightCount);
+        Serial.print(",PELLET:");
+        Serial.println(fed3.PelletCount);
     }
     else if (command == "NEW_TRIAL") {
         fed3.LeftCount = 0;
@@ -739,6 +758,15 @@ void loop() {
             fed3.UpdateDisplay();
             Serial.println("Mode set to Timed Feeding");
         }
+        else {
+            Serial.print("ERROR:UNKNOWN_MODE:");
+            Serial.println(mode_params);
+        }
+    }
+    else {
+        Serial.print("ERROR:UNKNOWN_CMD:");
+        Serial.println(command);
     }
   }
 }
+
