@@ -1,35 +1,47 @@
-# Classic FED3 with FNT Support
+# FED3 firmware v3 for FNT
 
 > [!WARNING]
-> This software has only been tested on the FED 3.2 revision, your milage may
-> vary when attempting to use a different model.
+> **Alpha, and not yet run on hardware.** The logic is tested on a PC (below);
+> the bench checklist at the end has not been worked through yet. Only tested
+> against the FED 3.2 hardware revision's pinout.
 
-This repository contains modified firmware for the **Feeding Experimentation
-Device 3 (FED3)**, customized to enable real-time event tracking, automated
-clock synchronization, and on-the-fly behavioral protocol switching when paired
-with the [FieldNeuroToolbox (FNT)](https://github.com/calebvogt/fnt).
+Firmware for the **Feeding Experimentation Device 3 (FED3)** that runs an
+experiment on its own. FNT compiles a protocol file into a schedule and uploads
+it at the start of a run. From then on the device makes every decision:
+- what each poke earns;
+- when to dispense;
+- which cue to play;
+- when to move to the next phase, by time of day, elapsed time or counts.
 
-This sketch is modified from the original `ClassicFED3` script from the official
-[KravitzLabDevices/FED3_library](https://github.com/KravitzLabDevices/FED3_library).
+The schedule and the device's place in it are kept on the SD card, so a crashed,
+rebooted or unplugged PC changes nothing for the animals.
 
-## Installation & Setup
+The design, the serial protocol and the data file format are specified in
+FNT's [`docs/fed3/design.md`](https://github.com/calebvogt/fnt). This firmware
+replaces the 14 hard-coded modes of `ClassicFed3withTimeSync`, and nothing in it
+is compatible with that version.
 
-**System & IDE Setup:** Follow the official
-[FED3 Setup Guide](https://github.com/KravitzLabDevices/FED3_library/wiki/Get-started)
-to configure your computer and Arduino IDE.
+## Layout
 
-### Building from the command line
+| Path | What |
+| --- | --- |
+| `fnt-fed3.ino` | The FED3's hardware: motor, beam sensors, LEDs, buzzer, BNC, SD card, RTC, display, watchdog. Plus `setup()` and `loop()`. |
+| `core.cpp`, `core.h` | Everything that decides what happens: parsing schedules, rules and cues; phases; recovery after a reboot; the data file; serial commands. Portable C++, reaching the hardware only through the `Hal` interface in `core.h`. |
+| `sketch.yaml` | The board platform and every library version, pinned. |
+| `test/` | The same core built for a PC, with a simulated clock, motor and SD card, and the tests that run on it. Arduino ignores it. |
 
-The sketch carries a
-[project file](https://arduino.github.io/arduino-cli/latest/sketch-project-file/)
-pinning the board platform and every library version, so a build does not depend
-on whatever happens to be installed locally:
+The repository is the sketch, so Arduino needs it in a folder named
+`fnt-fed3` (the name of the `.ino`). A GitHub zip unpacks as `fnt-fed3-v3`;
+rename the folder before opening it.
+
+## Building and flashing
+
+From the repository folder:
 
 ```bash
-arduino-cli board list
-arduino-cli compile ClassicFed3withTimeSync
-# Adjust the following command based on the result of the list
-arduino-cli upload -p /dev/ttyACM0 ClassicFed3withTimeSync
+arduino-cli compile .
+arduino-cli board list                      # find the port
+arduino-cli upload -p COM5 .                # or /dev/ttyACM0
 ```
 
 The first build needs the Adafruit board index:
@@ -40,147 +52,113 @@ arduino-cli config add board_manager.additional_urls \
 arduino-cli core update-index
 ```
 
-After changing a platform or library version, regenerate the pins with
-`arduino-cli compile --dump-profile ClassicFed3withTimeSync` and commit the
-result.
+On Windows, Arduino IDE 2 includes `arduino-cli.exe` under
+`%LOCALAPPDATA%\Programs\arduino-ide\resources\app\lib\backend\resources\`.
 
-The modified sketch is located at
-[`ClassicFed3withTimeSync/ClassicFed3withTimeSync.ino`](ClassicFed3withTimeSync/ClassicFed3withTimeSync.ino).
+**What a fresh card does:** a device with a blank SD card boots into FR1 on the
+left poke and logs to `IDLE.CSV` until FNT starts a run. Set its number once
+with `ID:<n>` (FNT does this from Setup); there is no boot menu any more.
 
-> [!IMPORTANT]
-> **Reflash every device before an experiment.** FNT refuses any board whose
-> `PING` reply carries no `FW:` field, or a version below 2.0 — it will connect,
-> report "firmware too old", and disconnect. This is deliberate: older firmware
-> parses `GET_FILE:<name>,<offset>` as a request for a file literally named
-> `"<name>,0"`, so SD mirroring and exports fail, and they fail silently
-> mid-experiment. Check a board by sending `PING` in a serial monitor; the reply
-> should read `PONG_FED3,ID:<n>,FW:2.0`.
+## Testing on a PC
 
-> [!NOTE]
-> Because these changes require a continuous wired USB connection to a host
-> computer running FNT, sleep mode is disabled in this firmware. This will
-> increase battery consumption.
+The device logic is built for the PC and checked against FNT's reference
+simulator (`fnt/fed3/device_sim.py`):
 
-## Key Modifications
-
-Compared to the standard Classic FED3 firmware, this version introduces:
-
-1. **Disabled Sleep Mode:** Disables the standard FED3 low-power sleep state to
-   ensure the microcontroller remains active and responsive to incoming serial
-   messages.
-2. **Serial Connection Setup:** Initializes a serial connection at `115200`
-   baud.
-3. **Live Event Tracking:** Automatically broadcasts nosepoke and pellet
-   dispensing events over the serial port as they occur, timestamped from the
-   device RTC.
-4. **Interactive Time Synchronization:** Adds a protocol to sync the FED3's
-   real-time clock (RTC) dynamically via serial commands.
-5. **Non-blocking SD card transfers:** Log files stream to the host a slice at a
-   time, so the behavioural task keeps running during a download.
-6. **Uninterrupted payloads:** Nothing else writes to the serial port while a
-   file is streaming. Nosepokes are queued and flushed once the transfer closes,
-   and commands other than `ABORT` are held until then. Without this, a poke
-   during a download splices an `EVT` line into the middle of the file, which
-   fails the CRC and costs both the chunk and the event.
-7. **Non-blocking command reads:** Commands are accumulated a byte at a time
-   rather than with `Serial.readStringUntil()`, which returns a truncated
-   command when a line is split across two USB packets — quietly turning
-   `MODE:FR,10` into `MODE:FR,1`.
-8. **Version reporting:** `PING` and `STATUS` carry `FW:`, which is how the host
-   decides whether ranged transfers are available.
-9. **Bounded pellet dispensing:** `feedPellet()` replaces the library's
-   `FED3::Feed()` at every call site. The library's version is
-   `do { ...jam clearing... } while (PelletAvailable == false)` with no exit but
-   a pellet reaching the well, plus a second unbounded wait for the pellet to be
-   _collected_ that calls `run()` — and therefore `goToSleep()` — inside the
-   loop. An empty hopper or an uncollected pellet meant `loop()` never ran
-   again: frozen display, unlogged pokes, stalled transfers, and no USB until a
-   power cycle. `feedPellet()` keeps the same rotation, the same jam-clearing
-   escalation, the same counter increment and the same `logdata()` row, but
-   services the serial layer between movements and gives up after
-   `FEED_MAX_TURNS`, reporting `EVT,...,JAM` instead of spinning forever.
-   Because the wait for collection now ends (`FEED_RETRIEVAL_TIMEOUT`), a
-   dispense can start with the previous pellet still in the well; it returns
-   without dispensing or counting, so an uneaten pellet is counted once.
-
-## Serial Communication Protocol
-
-Text commands, newline terminated, at 115200 baud.
-
-### Host → device
-
-| Command                      | Purpose                                            |
-| ---------------------------- | -------------------------------------------------- |
-| `PING`                       | Auto-discovery handshake                           |
-| `STATUS`                     | Full device state snapshot                         |
-| `SYNC:YYYY,MM,DD,HH,MM,SS`   | Set the RTC (`RTC_PCF8523`) and redraw the display |
-| `LIST_FILES`                 | Enumerate `FED*.CSV` on the SD card                |
-| `FSIZE:<name>`               | Current size of one file, without transferring it  |
-| `GET_FILE:<name>[,<offset>]` | Stream a file from a byte offset                   |
-| `ABORT`                      | Cancel an in-flight transfer                       |
-| `NEW_TRIAL`                  | Zero the counters and roll a new SD file           |
-| `FEED`                       | Dispense one pellet                                |
-| `LIGHTS:ON` / `LIGHTS:OFF`   | Toggle the NeoPixels                               |
-| `MODE:<spec>`                | Switch behavioural program (see below)             |
-
-### Device → host
-
-**Handshake.** `PONG_FED3,ID:<n>,FW:<version>`
-
-The `FW:` field gates everything else. A reply without one, or reporting less
-than 2.0, means the host disconnects rather than falling back — FNT supports one
-protocol, not two.
-
-**Status.**
-`STATUS,ID:..,FW:..,TIME:..,MODE:..,SESSION:..,FR:..,L:..,R:..,P:..,FILE:..`
-
-**Events.** One line per behavioural event, stamped with the device RTC:
-
-```
-EVT,<iso8601>,<LEFT|RIGHT|PELLET|JAM>,<left>,<right>,<pellet>,<millis>
+```bash
+make -C test test                  # FNT's device test suite, run on this C++
+python3 test/differential.py       # random scenarios through both; files must match
 ```
 
-`JAM` is not a behaviour: it means the device tried to dispense and gave up
-because the hopper is empty or the disk is stuck. It travels as an event so that
-it is stamped by the device, queued rather than spliced during a transfer, and
-lands in the host's `events.csv` beside the pokes it interrupts. The device
-keeps running and logging afterwards.
+Both expect an fnt checkout at `../fnt`, or wherever `FNT=` points.
+- **`make -C test test`** runs the same checks that define the simulator's
+  behaviour, against the C++.
+- **`differential.py`** plays days of random but reproducible pokes, retrievals,
+  reboots, power cuts and FNT commands through both implementations. It
+  requires their data files to match row for row.
 
-Counts are absolute running totals rather than deltas, so a host that dropped a
-line — or reconnected mid-session — resynchronizes on the next event instead of
-drifting.
+## Serial access from WSL
 
-**Time sync.** `SYNCED,<iso8601>` echoes the clock the device ended up with, so
-the host can record the residual offset instead of assuming the write landed.
+USB devices aren't visible inside WSL until they are attached with
+[usbipd-win](https://learn.microsoft.com/windows/wsl/connect-usb). The WSL
+kernel already has the USB/IP client and the `cdc-acm` serial driver. Once,
+from an **administrator** PowerShell:
 
-**File listing.** `FILE:<name>,<bytes>` per entry, terminated by `END_LIST`.
+```powershell
+winget install usbipd
+usbipd list                          # find the FED3's BUSID, e.g. 1-4
+usbipd bind --busid 1-4
+```
 
-**File transfer.** `FILE_DATA_START:<name>,<offset>,<size>`, then the raw bytes
-from `offset`, then `0x04` (EOT) and `CRC32:<hex>`. The CRC covers only the
-bytes sent in this range and uses the same polynomial as Python's `zlib.crc32`.
+Then, each time it is plugged in (no admin needed):
 
-**Errors.** `ERROR:<code>[:<detail>]`. Codes:
+```powershell
+usbipd attach --wsl --busid 1-4 --auto-attach
+```
 
-| Code                      | Meaning                                                                                                                                                                  |
-| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `STREAM_ABORTED:<reason>` | Transfer given up mid-flight (`HOST_STALLED`, `USB_LOST`, `HOST_REQUEST`, `NEW_TRIAL`)                                                                                   |
-| `STREAM_BUSY`             | A transfer was requested while one was already running                                                                                                                   |
-| `FILE_NOT_FOUND:<name>`   | No such file on the SD card                                                                                                                                              |
-| `CANNOT_OPEN_ROOT`        | SD card root directory unreadable                                                                                                                                        |
-| `BAD_SYNC`                | `SYNC:` arguments missing or out of range                                                                                                                                |
-| `EVENT_QUEUE_OVERFLOW`    | More than 12 pokes occurred during one transfer; the counts in later events are still absolute and correct, only the individual timestamps of the dropped ones were lost |
-| `COMMAND_TOO_LONG`        | Command exceeded the 64-byte input buffer                                                                                                                                |
-| `UNKNOWN_COMMAND:<text>`  | Command not recognised by this firmware                                                                                                                                  |
-| `UNKNOWN_MODE:<spec>`     | `MODE:` argument not recognised; the mode is unchanged                                                                                                                   |
+In WSL it appears as `/dev/ttyACM0`. You may need to add yourself to
+`dialout`, or run `sudo chmod a+rw /dev/ttyACM0`.
 
-**Ordering guarantee.** Between `FILE_DATA_START` and the `0x04` terminator the
-device emits _only_ file bytes. Events and command replies that occur during a
-transfer are queued and sent afterwards, so the CRC always covers exactly the
-requested byte range.
+- **Flash from Windows, not WSL.** Uploading resets the board into its
+  bootloader, which comes back as a different USB device. That's easiest with
+  `arduino-cli.exe` on Windows.
+- **A FED3 attached to WSL is invisible to Windows** until it is detached
+  (`usbipd detach --busid 1-4`). Don't attach a device FNT is using on
+  Windows.
 
-### Mode commands
+## Bench checklist
 
-`MODE:FR1` · `MODE:FR3` · `MODE:FR5` · `MODE:FR,<ratio>` · `MODE:PR` ·
-`MODE:RR,<ratio>` · `MODE:FRTO,<ratio>,<timeout_s>` · `MODE:FREE` ·
-`MODE:EXTINCT` · `MODE:LIGHTTRK` · `MODE:FR1_R` · `MODE:FR_R,<ratio>` ·
-`MODE:PR_R` · `MODE:OPTO` · `MODE:OPTO_R` · `MODE:TIMED`
+Work through this on a spare FED3, not one in an experiment, before first use.
+Each step names what to send and what to expect; a serial monitor at any baud
+rate works.
+1. **Flash, then boot with a blank card.**
+   - Expect `BOOT,fw=3.0,reset=…,clock=…,sched=default,run=-`.
+   - The display shows `FED3 #1`, `Default`, and the counts.
+2. **`PING`** → `PONG,id=1,fw=3.0,proto=3`. Then **`ID:7`** → `ID,id=7`; reboot and
+   check `#7` and `PONG,id=7`.
+3. **Clock.**
+   - `TIME:<now in standard time, e.g. 2026-10-20T09:00:00-07:00>` → a
+     `TIME,before=…,after=…` line.
+   - `STATUS` then shows `clock=ok`.
+   - Pull the coin cell with the board unpowered, boot: `clock=unset`.
+4. **Pokes.**
+   - Poke left: a `ROW` with `event=poke,side=L,outcome=reward`.
+   - About a second later a `dispense` row, and the pellet is in the well.
+   - Take it: a `retrieve` row with a sensible `retrieval_ms`.
+   - Poke right: `outcome=inactive`.
+5. **A held beam.**
+   - Block the left poke for over a minute.
+   - The display and serial must stay responsive throughout.
+   - One row with `poke_ms=60000,detail=held`.
+6. **Jam.**
+   - Empty the hopper and poke left.
+   - The motor works through its clearing moves for a minute or two.
+   - Then a `jam` row, and `STATUS` shows `jam=1`.
+   - Refill: within 10 minutes a `dispense` row with `detail=retry`.
+7. **Cues.**
+   - `TEST:tone:4000:200` plays a tone.
+   - `TEST:flash:bar:0:0:30:0:500` flashes the bar blue, then the bar goes
+     dark.
+   - `TEST:flash:pokes:0:30:0:0:500` lights both pokes.
+   - `TEST:bnc:10:20:20` gives 20 pulses at 20 Hz on BNC (check with a scope
+     or LED).
+8. **A schedule from FNT.**
+   - Upload example 1 from the design doc with `fnt-fed compile`.
+   - Then `SCHED:COMMIT,<crc>` and `RUN:BEGIN,TEST1,<now>,<crc>`.
+   - Both pokes now reward. After 50 rewards a `phase` row reads `FR3`.
+9. **Power cut.**
+   - Mid-run, unplug USB and battery for a minute, then reconnect.
+   - `BOOT,…,run=TEST1`.
+   - `STATUS` shows the same phase and counts, and `seq` carries on.
+10. **Watchdog.** Hard to provoke on purpose. Note any `reset=watchdog` seen
+    during long runs, since each is a bug to report.
+11. **`READ:TEST1,1`**: the whole run replays, then
+    `READ_END,run=TEST1,last=<seq>`.
+12. **Soak.** Leave it running a 24 h protocol with a daily window. At the end,
+    compare the card's `TEST1.CSV` with FNT's copy; they must be identical.
+
+## Credits
+
+Pin assignments, the motor's dispense and jam-clearing movements, and the
+hardware this runs on come from the
+[FED3 library](https://github.com/KravitzLabDevices/FED3_library) by Lex
+Kravitz and Eric Lin (CC BY-SA 3.0). The original FED is Nguyen et al. 2016.

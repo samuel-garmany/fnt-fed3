@@ -1,2 +1,4 @@
 .direnv/
 .envrc
+test/libfed3core.so
+__pycache__/
