@@ -116,6 +116,9 @@ class HostHal : public Hal {
     return DISPENSE_LANDED;
   }
 
+  bool lightsOn = false;
+  void lights(bool on) override { lightsOn = on; }
+
   void playCue(uint8_t slot, const Cue& cue, uint8_t) override {
     static const char* const SLOTS[] = {"reward", "counted", "inactive", "timeout", "depleted"};
     char text[128];

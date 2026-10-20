@@ -1025,6 +1025,8 @@ void Device::simpleRow(const char* event, const char* detail) {
 
 // device_sim.SimDevice.boot
 void Device::boot(uint8_t cause) {
+  lights_ = false;
+  hal_.lights(false);
   memset(hold_, 0, sizeof(hold_));
   memset(&read_, 0, sizeof(read_));
   staging_ = stagingFailed_ = false;
@@ -1303,7 +1305,10 @@ void Device::handleWell() {
     simpleRow("dispense", REASONS[reason_]);
   } else if (event == DISPENSE_JAMMED) {
     well_ = WELL_EMPTY;
-    jammed_ = true;
+    // An earned or free pellet is owed, so it's retried every 10 minutes. One
+    // fed by hand is a bench check nobody is owed: report it and stop, rather
+    // than run the motor every 10 minutes on an empty hopper.
+    jammed_ = reason_ != R_MANUAL;
     jamMs_ = hal_.millis();
     simpleRow("jam", reason_ == R_REWARD ? "reward" : REASONS[reason_]);
   }
@@ -1434,6 +1439,14 @@ void Device::handleLine(const char* line) {
     snprintf(out, sizeof(out), "FEED,result=%s", DISPENSE_RESULTS[dispense(R_MANUAL)]);
     return reply(out);
   }
+  if (startsWith(line, "LIGHTS:")) {
+    const char* arg = line + 7;
+    if (strcmp(arg, "on") != 0 && strcmp(arg, "off") != 0) return reply("ERR,BAD_LIGHTS,on|off");
+    lights_ = strcmp(arg, "on") == 0;
+    hal_.lights(lights_);
+    snprintf(out, sizeof(out), "LIGHTS,on=%d", lights_ ? 1 : 0);
+    return reply(out);
+  }
   if (startsWith(line, "TEST:")) {
     Cue c;
     const char* err = parseCue(line + 5, c);
@@ -1498,14 +1511,14 @@ void Device::status() {
            "STATUS,id=%u,fw=%s,time=%s,clock=%s,sd=%s,run=%s,ended=%d,sched=%s,next_sched=%s,"
            "phase=%u,phase_name=%s,phase_start=%s,next=%s,file=%s,seq=%lu,l=%lu,r=%lu,pellets=%lu,"
            "phase_rewards=%lu,phase_left=%lu,phase_right=%lu,depleted=%d,well=%d,jam=%d,uptime=%lu,"
-           "batt=%s,temp=%s,hum=%s",
+           "batt=%s,temp=%s,hum=%s,lights=%d",
            id_, FIRMWARE, time, clockOk() ? "ok" : "unset", (sdError_ || !hal_.sdOk()) ? "err" : "ok",
            runId_, ended_ ? 1 : 0, sched, nextSched, phaseIndex_, phase_.name, start, next, file_,
            (unsigned long)seq_, (unsigned long)left_, (unsigned long)right_, (unsigned long)pellets_,
            (unsigned long)phaseRewards_, (unsigned long)phaseLeft_, (unsigned long)phaseRight_,
            isDepleted ? 1 : 0, well_ == WELL_FULL ? 1 : 0, jammed_ ? 1 : 0,
            (unsigned long)(hal_.millis() / 1000), fixed(b, r.battery, 2), fixed(t, r.temperature, 1),
-           fixed(h, r.humidity, 0));
+           fixed(h, r.humidity, 0), lights_ ? 1 : 0);
   reply(out);
 }
 
@@ -1684,6 +1697,10 @@ void Device::runBegin(const char* arg) {
     nextPresent_ = false;
   }
   snprintf(runId_, sizeof(runId_), "%.8s", parts[0]);
+  if (lights_) {            // a run starts with the lights as its cues leave them
+    lights_ = false;
+    hal_.lights(false);
+  }
   t0_ = (uint32_t)(utc + offsetMin_ * 60);
   ended_ = false;
   snprintf(file_, sizeof(file_), "%s.CSV", runId_);

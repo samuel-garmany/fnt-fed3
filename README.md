@@ -113,7 +113,7 @@ rate works.
 1. **Flash, then boot with a blank card.**
    - Expect `BOOT,fw=3.0,reset=…,clock=…,sched=default,run=-`.
    - The display shows `FED3 #1`, `Default`, and the counts.
-2. **`PING`** → `PONG,id=1,fw=3.0,proto=3`. Then **`ID:7`** → `ID,id=7`; reboot and
+2. **`PING`** → `PONG,id=1,fw=3.1,proto=3`. Then **`ID:7`** → `ID,id=7`; reboot and
    check `#7` and `PONG,id=7`.
 3. **Clock.**
    - `TIME:<now in standard time, e.g. 2026-10-20T09:00:00-07:00>` → a
@@ -129,31 +129,39 @@ rate works.
    - Block the left poke for over a minute.
    - The display and serial must stay responsive throughout.
    - One row with `poke_ms=60000,detail=held`.
-6. **Jam.**
+6. **Feed.**
+   - `FEED` turns the disk at about 14 RPM (a step every 2.1 ms, as the classic
+     library paces it) and a pellet drops within a few seconds: a `dispense`
+     row with `detail=manual`. A buzz with no movement means the steps are too
+     fast for the motor.
+7. **Jam.**
    - Empty the hopper and poke left.
    - The motor works through its clearing moves for a minute or two.
    - Then a `jam` row, and `STATUS` shows `jam=1`.
    - Refill: within 10 minutes a `dispense` row with `detail=retry`.
-7. **Cues.**
+8. **Cues.**
    - `TEST:tone:4000:200` plays a tone.
    - `TEST:flash:bar:0:0:30:0:500` flashes the bar blue, then the bar goes
      dark.
    - `TEST:flash:pokes:0:30:0:0:500` lights both pokes.
+   - `LIGHTS:on` lights the bar and both pokes white and leaves them on; a
+     `TEST` flash plays over them and they come back. `LIGHTS:off`, a reboot or
+     `RUN:BEGIN` turns them off. `STATUS` shows `lights=1` while they're on.
    - `TEST:bnc:10:20:20` gives 20 pulses at 20 Hz on BNC (check with a scope
      or LED).
-8. **A schedule from FNT.**
+9. **A schedule from FNT.**
    - Upload example 1 from the design doc with `fnt-fed compile`.
    - Then `SCHED:COMMIT,<crc>` and `RUN:BEGIN,TEST1,<now>,<crc>`.
    - Both pokes now reward. After 50 rewards a `phase` row reads `FR3`.
-9. **Power cut.**
+10. **Power cut.**
    - Mid-run, unplug USB and battery for a minute, then reconnect.
    - `BOOT,…,run=TEST1`.
    - `STATUS` shows the same phase and counts, and `seq` carries on.
-10. **Watchdog.** Hard to provoke on purpose. Note any `reset=watchdog` seen
+11. **Watchdog.** Hard to provoke on purpose. Note any `reset=watchdog` seen
     during long runs, since each is a bug to report.
-11. **`READ:TEST1,1`**: the whole run replays, then
+12. **`READ:TEST1,1`**: the whole run replays, then
     `READ_END,run=TEST1,last=<seq>`.
-12. **Soak.** Leave it running a 24 h protocol with a daily window. At the end,
+13. **Soak.** Leave it running a 24 h protocol with a daily window. At the end,
     compare the card's `TEST1.CSV` with FNT's copy; they must be identical.
 
 ## Credits

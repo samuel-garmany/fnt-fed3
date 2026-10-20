@@ -49,6 +49,7 @@ class ArduinoHal : public Hal {
   void startDispense() override;
   uint8_t dispenseEvent() override;
   void playCue(uint8_t slot, const Cue& cue, uint8_t side) override;
+  void lights(bool on) override;
   void read(Readings& out) override;
   uint32_t random32() override;
   void show(const Screen& screen) override;
@@ -73,8 +74,12 @@ const uint8_t PIN_SHARP_SCK = 12, PIN_SHARP_MOSI = 11, PIN_SHARP_SS = 10;
 const uint8_t PIXEL_RIGHT_POKE = 8, PIXEL_LEFT_POKE = 9;
 
 const int STEPS_PER_REV = 2038;
-const int MOTOR_RPM = 250;
-const uint16_t STEPS_PER_PASS = 40;      // motor steps per loop: ~5 ms
+const int MOTOR_RPM = 250;               // only Stepper's minimum gap; STEP_US sets the pace
+// One step every 2.1 ms (~14 RPM), the pace the classic FED3 library's
+// RotateDisk keeps (a step, then 2 ms of well checks). The geared 28BYJ-48
+// can't follow much faster: back-to-back steps only buzz the coils and the
+// disk never turns.
+const uint32_t STEP_US = 2100;
 const uint16_t MAX_TURNS = 30;           // then report a jam and retry later
 const uint32_t SD_RETRY_MS = 10000;
 
@@ -128,17 +133,21 @@ struct Motor {
   int32_t steps;
   bool waiting;
   uint32_t waitUntil;
+  uint32_t lastStepUs;
 } motor;
 
 // --- lights, sound, BNC ----------------------------------------------------
 
-bool barOn = false, leftOn = false, rightOn = false;
+bool barOn = false, leftOn = false, rightOn = false;     // a flash is showing
 uint32_t barUntil = 0, leftUntil = 0, rightUntil = 0;
+bool steady = false;                                     // LIGHTS:on
+const uint8_t STEADY[4] = {0, 0, 0, 40};                 // the built-in white
+const uint8_t DARK[4] = {0, 0, 0, 0};
 uint32_t noiseUntil = 0, noiseNext = 0;
 volatile uint16_t bncWidth = 0, bncPeriod = 0, bncTick = 0, bncRemaining = 0;
 
 void power(bool on) {
-  bool needed = on || motor.active || barOn || leftOn || rightOn;
+  bool needed = on || motor.active || barOn || leftOn || rightOn || steady;
   if (needed && digitalRead(PIN_MOTOR_ENABLE) == LOW) {
     digitalWrite(PIN_MOTOR_ENABLE, HIGH);
     delay(2);   // let the driver and pixels settle
@@ -147,11 +156,17 @@ void power(bool on) {
   }
 }
 
-void releaseMotor() {
+// De-energize the coils between moves, as the classic library does after
+// every RotateDisk: holding current otherwise flows through every 1.5 s wait.
+void coilsOff() {
   digitalWrite(A2, LOW);
   digitalWrite(A3, LOW);
   digitalWrite(A4, LOW);
   digitalWrite(A5, LOW);
+}
+
+void releaseMotor() {
+  coilsOff();
   motor.active = false;
   power(false);
 }
@@ -238,12 +253,13 @@ void serviceMotor() {
     motor.waiting = false;
   }
   if (motor.steps != 0) {
-    for (uint16_t i = 0; i < STEPS_PER_PASS && motor.steps != 0; i++) {
-      int dir = motor.steps > 0 ? 1 : -1;
-      stepper.step(dir);
-      motor.steps -= dir;
-      if (wellDetected()) return finishDispense(DISPENSE_LANDED);
-    }
+    uint32_t now = micros();
+    if (now - motor.lastStepUs < STEP_US) return;
+    motor.lastStepUs = now;
+    int dir = motor.steps > 0 ? 1 : -1;
+    stepper.step(dir);
+    motor.steps -= dir;
+    if (motor.steps == 0) coilsOff();
     return;
   }
   if (nextMove()) return;
@@ -257,7 +273,8 @@ void setPixels(uint8_t first, uint8_t last, const uint8_t* rgbw) {
 }
 
 void serviceLights() {
-  static const uint8_t off[4] = {0, 0, 0, 0};
+  // A flash that ends goes back to what's underneath: dark, or the steady light.
+  const uint8_t* off = steady ? STEADY : DARK;
   uint32_t now = ::millis();
   bool changed = false;
   if (barOn && (int32_t)(now - barUntil) >= 0) {
@@ -633,6 +650,17 @@ void ArduinoHal::playCue(uint8_t slot, const Cue& cue, uint8_t side) {
   }
 }
 
+void ArduinoHal::lights(bool on) {
+  steady = on;
+  const uint8_t* colour = on ? STEADY : DARK;
+  if (!barOn) setPixels(0, 7, colour);
+  if (!leftOn) setPixels(PIXEL_LEFT_POKE, PIXEL_LEFT_POKE, colour);
+  if (!rightOn) setPixels(PIXEL_RIGHT_POKE, PIXEL_RIGHT_POKE, colour);
+  power(true);
+  strip.show();
+  power(false);
+}
+
 void ArduinoHal::read(Readings& out) {
   analogReadResolution(10);
   out.battery = analogRead(PIN_VBAT) * 2.0f * 3.3f / 1024.0f;
@@ -654,6 +682,9 @@ uint32_t ArduinoHal::random32() {
 }
 
 void ArduinoHal::show(const Screen& s) {
+  // A redraw blocks for tens of milliseconds, which would stall the motor
+  // mid-move; the screen catches up when the dispense is over.
+  if (motor.active) return;
   uint32_t now = ::millis();
   uint32_t minute = s.localSeconds / 60;
   bool changed = !everDrawn || s.id != drawn.id || strcmp(s.phase, drawn.phase) != 0 ||

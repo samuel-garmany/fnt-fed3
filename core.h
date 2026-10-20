@@ -227,6 +227,9 @@ class Hal {
 
   // slot is a CueSlot, or 255 for TEST; side is where the triggering poke was.
   virtual void playCue(uint8_t slot, const Cue& cue, uint8_t side) = 0;
+  // Bar and poke lights on steadily (white), for finding a device on the
+  // bench. Cues still flash over them; off means dark again.
+  virtual void lights(bool on) = 0;
 
   virtual void read(Readings& out) = 0;
   virtual uint32_t random32() = 0;
@@ -239,7 +242,7 @@ class Hal {
 // The device
 // ===========================================================================
 
-const char* const FIRMWARE = "3.0";
+const char* const FIRMWARE = "3.1";
 const int PROTO = 3;
 const int MAX_COMMAND = 128;
 const uint32_t JAM_RETRY_MS = 600000UL;
@@ -309,6 +312,7 @@ class Device {
   bool haveRetrieve_ = false;
   uint32_t lastRetrieveMs_ = 0;
   bool jammed_ = false;
+  bool lights_ = false;     // LIGHTS:on; never survives a boot or RUN:BEGIN
   uint32_t jamMs_ = 0;
 
   // Pokes being held
