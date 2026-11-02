@@ -1,9 +1,4 @@
-# FED3 firmware v3 for FNT
-
-> [!WARNING]
-> **Alpha, and not yet run on hardware.** The logic is tested on a PC (below);
-> the bench checklist at the end has not been worked through yet. Only tested
-> against the FED 3.2 hardware revision's pinout.
+# FED3 firmware for FNT
 
 Firmware for the **Feeding Experimentation Device 3 (FED3)** that runs an
 experiment on its own. FNT compiles a protocol file into a schedule and uploads
