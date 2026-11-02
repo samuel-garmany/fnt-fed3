@@ -324,7 +324,7 @@ void draw(const Screen& s) {
   display.setTextColor(0);   // black
   char line[40];
   display.setCursor(4, 16);
-  snprintf(line, sizeof(line), "FED3  #%u", s.id);
+  snprintf(line, sizeof(line), "FED%03u", s.id);   // its ID, as FNT and the protocol write it
   display.print(line);
   display.setCursor(4, 38);
   snprintf(line, sizeof(line), "%.14s", s.phase);
@@ -726,9 +726,130 @@ void TC3_Handler() {
 fed::ArduinoHal hal;
 fed::Device device(hal);
 
+// --- the ID menu at power-on --------------------------------------------------
+//
+// A FED3's ID is its one name: on this screen, in the protocol (FED007), in its
+// data and in FNT. Set it here or from FNT's Setup.
+//
+// At power-on or reset the screen offers the menu for a few seconds: hold both
+// pokes to open it. Left poke -1, right poke +1 (hold one to go faster). It
+// saves after a few seconds without a poke and carries on booting. It's never
+// offered during a run, or after a watchdog restart, so an animal can't open
+// it; and both pokes must be held a full second.
+
+namespace fed {
+namespace {
+
+const uint32_t MENU_OFFER_MS = 3000, MENU_HOLD_MS = 1000, MENU_IDLE_MS = 4000;
+const uint32_t MENU_REPEAT_AFTER_MS = 600, MENU_REPEAT_MS = 100;
+
+bool pokeHeld(uint8_t pin) { return digitalRead(pin) == LOW; }
+
+void menuScreen(const char* title, uint16_t id, const char* line1, const char* line2) {
+  char text[16];
+  display.clearDisplay();
+  display.setFont(&FreeSans9pt7b);
+  display.setTextColor(0);
+  display.setTextSize(1);
+  display.setCursor(4, 18);
+  display.print(title);
+  display.setTextSize(2);
+  display.setCursor(4, 70);
+  snprintf(text, sizeof(text), "FED%03u", id);
+  display.print(text);
+  display.setTextSize(1);
+  display.setCursor(4, 110);
+  display.print(line1);
+  display.setCursor(4, 132);
+  display.print(line2);
+  display.refresh();
+}
+
+// Pokes made in the menu aren't the animal's: drop them before the run code
+// sees them.
+void forgetPokes() {
+  noInterrupts();
+  qTail = qHead;
+  broken[0] = pokeHeld(PIN_LEFT);
+  broken[1] = pokeHeld(PIN_RIGHT);
+  interrupts();
+}
+
+// Wait up to ``ms`` for both pokes to be held for MENU_HOLD_MS.
+bool bothHeldWithin(uint32_t ms) {
+  uint32_t start = ::millis(), heldSince = 0;
+  while (::millis() - start < ms) {
+    hal.feedWatchdog();
+    if (pokeHeld(PIN_LEFT) && pokeHeld(PIN_RIGHT)) {
+      if (!heldSince) heldSince = ::millis();
+      if (::millis() - heldSince >= MENU_HOLD_MS) return true;
+    } else {
+      heldSince = 0;
+    }
+    delay(5);
+  }
+  return false;
+}
+
+void idMenu(uint8_t cause) {
+  if (device.inRun() || cause == RESET_WATCHDOG || cause == RESET_SOFTWARE) return;
+  menuScreen("FED3 ID", device.id(), "Hold both pokes", "to change it");
+  if (!bothHeldWithin(MENU_OFFER_MS)) {
+    everDrawn = false;           // the run screen replaces the offer
+    return;
+  }
+
+  uint16_t id = device.id();
+  menuScreen("Set ID", id, "Left -   Right +", "Release both");
+  for (uint32_t start = ::millis(); pokeHeld(PIN_LEFT) || pokeHeld(PIN_RIGHT);) {
+    hal.feedWatchdog();          // let go of both first
+    if (::millis() - start > 10000) break;   // a blocked sensor: carry on regardless
+    delay(5);
+  }
+  menuScreen("Set ID", id, "Left -   Right +", "Saves after 4 s");
+  uint32_t lastPoke = ::millis(), nextStep[2] = {0, 0};
+  bool wasHeld[2] = {false, false};
+  while (::millis() - lastPoke < MENU_IDLE_MS) {
+    hal.feedWatchdog();
+    bool changed = false;
+    for (uint8_t side = 0; side < 2; side++) {
+      bool held = pokeHeld(side == 0 ? PIN_LEFT : PIN_RIGHT);
+      uint32_t now = ::millis();
+      bool step = held && (!wasHeld[side] || (int32_t)(now - nextStep[side]) >= 0);
+      if (held && !wasHeld[side]) nextStep[side] = now + MENU_REPEAT_AFTER_MS;
+      else if (step) nextStep[side] = now + MENU_REPEAT_MS;
+      wasHeld[side] = held;
+      if (!step) continue;
+      id = side == 0 ? (id <= 1 ? 999 : id - 1) : (id >= 999 ? 1 : id + 1);
+      lastPoke = now;
+      changed = true;
+    }
+    if (changed) {
+      tone(PIN_BUZZER, 4000, 15);
+      menuScreen("Set ID", id, "Left -   Right +", "Saves after 4 s");
+    }
+    delay(5);
+  }
+  if (id != device.id()) device.setId(id);
+  menuScreen("Saved", device.id(), "", "");
+  tone(PIN_BUZZER, 4000, 150);
+  uint32_t shown = ::millis();
+  while (::millis() - shown < 1000) {
+    hal.feedWatchdog();
+    delay(5);
+  }
+  forgetPokes();
+  everDrawn = false;             // the run screen redraws in full
+}
+
+}  // namespace
+}  // namespace fed
+
 void setup() {
   hal.begin();
-  device.boot(hal.resetCause());
+  uint8_t cause = hal.resetCause();
+  device.boot(cause);
+  fed::idMenu(cause);
 }
 
 void loop() {

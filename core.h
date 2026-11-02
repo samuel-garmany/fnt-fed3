@@ -270,6 +270,11 @@ class Device {
   void currentRule(Rule& out);          // the rule in force now
   bool needsFineTicks() const;          // host build: something is timing in ms
   const char* dataFile() const { return file_; }
+  // The FED3's ID, its one name: on its screen, in the protocol, in FNT.
+  // Set by ID: or by the boot menu (fnt-fed3.ino); kept in DEVICE.TXT.
+  uint16_t id() const { return id_; }
+  void setId(uint16_t id);
+  bool inRun() const { return activeRun(); }   // a run that hasn't ended
 
  private:
   Hal& hal_;

@@ -26,7 +26,7 @@ TZ = timezone(timedelta(hours=-7))
 PROTOCOL = f"""\
 format: {proto.FORMAT}
 name: Differential
-devices: [A]
+devices: [FED001]
 cues:
   ding: [{{tone: {{hz: 3000, ms: 50}}}}, {{flash: {{target: poke, color: blue, ms: 300}}}}]
 phases:
@@ -124,7 +124,7 @@ def compare(a, b):
 
 def main(seeds=range(1, 9)):
     compiled = proto.compile_protocol(proto.load(PROTOCOL))
-    schedule = compiled.schedules["A"]
+    schedule = compiled.schedules["FED001"]
     failures = 0
     for seed in seeds:
         actions = build_actions(seed)

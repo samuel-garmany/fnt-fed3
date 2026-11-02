@@ -808,6 +808,12 @@ void Device::loadDevice() {
   }
 }
 
+void Device::setId(uint16_t id) {
+  if (id < 1 || id > 999) return;
+  id_ = id;
+  saveDevice();
+}
+
 void Device::saveDevice() {
   char text[64];
   int off = offsetMin_ < 0 ? -offsetMin_ : offsetMin_;
@@ -1416,8 +1422,7 @@ void Device::handleLine(const char* line) {
     uint32_t id;
     if (!parseUint(line + 3, strlen(line + 3), 1, 999, id) || strlen(line + 3) > 3)
       return reply("ERR,BAD_ID,1-999");
-    id_ = (uint16_t)id;
-    saveDevice();
+    setId((uint16_t)id);
     snprintf(out, sizeof(out), "ID,id=%u", id_);
     return reply(out);
   }

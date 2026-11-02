@@ -56,8 +56,19 @@ On Windows, Arduino IDE 2 includes `arduino-cli.exe` under
 `%LOCALAPPDATA%\Programs\arduino-ide\resources\app\lib\backend\resources\`.
 
 **What a fresh card does:** a device with a blank SD card boots into FR1 on the
-left poke and logs to `IDLE.CSV` until FNT starts a run. Set its number once
-with `ID:<n>` (FNT does this from Setup); there is no boot menu any more.
+left poke and logs to `IDLE.CSV` until FNT starts a run. Its ID starts as
+FED001.
+
+**Its ID** is its one name: on its screen, in FNT's protocols (`devices:
+[FED007]`), in its data file and on FNT's cards. Set it either way; it's kept
+on the SD card:
+- **On the FED3:** at power-on (or after the reset button) the screen shows
+  `FED3 ID` for 3 seconds. Hold both pokes for a second to open the menu. Left
+  poke takes one off, right poke adds one; hold either to go faster. Four
+  seconds without a poke saves it (`Saved`) and the FED3 carries on booting.
+  The menu isn't offered during a run or after a watchdog restart, so an
+  animal can't open it.
+- **From FNT:** the ID box in Setup (`ID:<n>`).
 
 ## Testing on a PC
 
@@ -112,9 +123,18 @@ Each step names what to send and what to expect; a serial monitor at any baud
 rate works.
 1. **Flash, then boot with a blank card.**
    - Expect `BOOT,fw=3.0,reset=…,clock=…,sched=default,run=-`.
-   - The display shows `FED3 #1`, `Default`, and the counts.
+   - The display shows `FED3 ID` / `FED001` for 3 seconds, then `FED001`,
+     `Default`, and the counts.
 2. **`PING`** → `PONG,id=1,fw=3.1,proto=3`. Then **`ID:7`** → `ID,id=7`; reboot and
-   check `#7` and `PONG,id=7`.
+   check `FED007` and `PONG,id=7`.
+   - **The boot menu:** power-cycle, hold both pokes while `FED3 ID` shows.
+     Right poke three times → `FED010`, then wait: `Saved`, a long beep, and
+     the normal screen. `PING` → `PONG,id=10`. No poke rows were logged for
+     the menu's pokes.
+   - Hold the right poke: the ID climbs quickly. Left from `FED001` wraps to
+     `FED999`.
+   - Start a run from FNT, power-cycle: no `FED3 ID` screen, straight back
+     into the run.
 3. **Clock.**
    - `TIME:<now in standard time, e.g. 2026-10-20T09:00:00-07:00>` → a
      `TIME,before=…,after=…` line.
