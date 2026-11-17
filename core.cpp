@@ -615,7 +615,8 @@ static const char HEADER[] =
 static const char* const OUTCOMES[] = {"reward", "counted", "inactive", "timeout",
                                        "short", "pellet_in_well", "depleted"};
 static const char* const REASONS[] = {"", "free", "manual", "retry"};
-static const char* const RESETS[] = {"power", "watchdog", "software", "external"};
+static const char* const RESETS[] = {"power", "watchdog", "software", "external", "card"};
+static const int NUM_RESETS = 5;
 static const char* const DISPENSE_RESULTS[] = {"started", "pellet_in_well", "jam"};
 static const int ROW_COLUMNS = 16;
 static const char IDLE_FILE[] = "IDLE.CSV";
@@ -741,6 +742,16 @@ static int splitRow(char* line, char** cols) {
   return n;
 }
 
+// A whole row: every column, and a sequence number. A row cut off by a power
+// cut, or anything else that isn't one, is passed over wherever rows are read.
+static bool goodRow(char* line, char** cols) {
+  if (splitRow(line, cols) < ROW_COLUMNS || !*cols[2]) return false;
+  for (const char* p = cols[2]; *p; p++) {
+    if (!isDigit(*p)) return false;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 
 Device::Device(Hal& hal) : hal_(hal) {
@@ -815,6 +826,9 @@ void Device::setId(uint16_t id) {
 }
 
 void Device::saveDevice() {
+  // What's in memory without the card is the defaults (ID 1, no offset), not
+  // this device's own: writing it would replace the real ID on the card.
+  if (!cardLoaded_) return;
   char text[64];
   int off = offsetMin_ < 0 ? -offsetMin_ : offsetMin_;
   sprintf(text, "id=%u\noffset=%c%02d:%02d\n", id_, offsetMin_ < 0 ? '-' : '+', off / 60, off % 60);
@@ -874,7 +888,7 @@ static bool eachLine(Hal& hal, const char* name, Fn fn) {
     for (int32_t i = 0; i < n; i++) {
       if (buf[i] == '\n') {
         line[used] = 0;
-        if (overflow || !fn(line, used)) return !overflow && false;
+        if (overflow || !fn(line, used)) return false;
         used = 0;
       } else if (used < MAX_COMMAND) {
         line[used++] = buf[i];
@@ -943,6 +957,14 @@ static bool lineBefore(Hal& hal, const char* name, uint32_t end, char* out, uint
   return true;
 }
 
+void Device::resetPhaseCounts() {
+  phaseRewards_ = phaseLeft_ = phaseRight_ = 0;
+  quotaUsed_ = 0;
+  haveQuotaPeriod_ = false;
+  counters_[0] = counters_[1] = counters_[2] = 0;
+  timeoutActive_ = false;
+}
+
 // device_sim.SimDevice._restore_counts
 void Device::restoreCounts() {
   seq_ = left_ = right_ = pellets_ = 0;
@@ -956,11 +978,22 @@ void Device::restoreCounts() {
     if (!hal_.fileWrite(file_, header, strlen(header))) sdError_ = true;
     return;
   }
+  // A row cut off by a power cut has no newline. End it, so the next row
+  // starts on a line of its own, and count from the last whole row before it.
+  char lastByte;
+  if (hal_.fileRead(file_, (uint32_t)size - 1, &lastByte, 1) == 1 && lastByte != '\n' &&
+      hal_.fileAppend(file_, "\n", 1))
+    size++;
   char line[MAX_COMMAND * 3];
-  uint32_t start;
-  if (!lineBefore(hal_, file_, (uint32_t)size, line, start) || start == 0) return;
   char* cols[ROW_COLUMNS];
-  if (splitRow(line, cols) < ROW_COLUMNS) return;
+  uint32_t start, end = (uint32_t)size;
+  bool found = false;
+  for (int tries = 0; tries < 8 && !found; tries++) {
+    if (!lineBefore(hal_, file_, end, line, start) || start == 0) return;
+    end = start;
+    found = goodRow(line, cols);
+  }
+  if (!found) return;
   seq_ = toUint(cols[2]);
   left_ = toUint(cols[7]);
   right_ = toUint(cols[8]);
@@ -979,17 +1012,17 @@ void Device::restoreCounts() {
   int64_t index = elapsed >= 0 ? elapsed / period : -((-elapsed + period - 1) / period);
   int64_t periodStart = phaseStart_ + index * (int64_t)period;
   uint32_t used = 0;
-  uint32_t end = (uint32_t)size;
+  end = (uint32_t)size;
   while (lineBefore(hal_, file_, end, line, start) && start > 0) {
     end = start;
-    if (splitRow(line, cols) < ROW_COLUMNS) break;
+    hal_.feedWatchdog();
+    if (!goodRow(line, cols)) continue;
     int64_t utc;
     int16_t off;
     if (!parseIso(cols[0], utc, off)) continue;
     int64_t when = utc + offsetMin_ * 60;
     if (when < periodStart || toUint(cols[3]) != phaseIndex_) break;
     if (strcmp(cols[4], "poke") == 0 && strcmp(cols[6], "reward") == 0) used++;
-    hal_.feedWatchdog();
   }
   quotaUsed_ = used;
   quotaPeriod_ = (int32_t)index;
@@ -1013,14 +1046,40 @@ void Device::row(const char* event, const char* side, const char* outcome, int32
                    (unsigned long)phaseRight_, retrievalMs, pokeMs, detail);
   if (n < 0 || n >= (int)sizeof(line) - 1) n = sizeof(line) - 2;
   line[n] = '\n';
-  if (hal_.fileAppend(file_, line + 4, n - 3)) {
+  flushBacklog();     // rows the card refused earlier go first: the file stays in order
+  if (backlogLen_ == 0 && hal_.fileAppend(file_, line + 4, n - 3)) {
     line[n] = 0;
     hal_.send(line);
     sdError_ = false;
-  } else {
-    sdError_ = true;
-    hal_.send("ERR,SD,append failed");
+    return;
   }
+  sdError_ = true;
+  hal_.send("ERR,SD,append failed");
+  // Kept until the card answers again. With no room left the row is lost, and
+  // its number is given to the next one: the file never has a gap in seq, which
+  // FNT would wait on.
+  uint32_t len = (uint32_t)n - 3;
+  if (backlogLen_ + len <= sizeof(backlog_)) {
+    memcpy(backlog_ + backlogLen_, line + 4, len);
+    backlogLen_ = (uint16_t)(backlogLen_ + len);
+  } else {
+    seq_--;
+  }
+}
+
+// device_sim.SimDevice._flush_backlog
+void Device::flushBacklog() {
+  if (!backlogLen_ || !hal_.fileAppend(file_, backlog_, backlogLen_)) return;
+  char line[MAX_COMMAND * 3];
+  uint16_t from = 0;
+  for (uint16_t i = 0; i < backlogLen_; i++) {
+    if (backlog_[i] != '\n') continue;
+    snprintf(line, sizeof(line), "ROW,%.*s", (int)(i - from), backlog_ + from);
+    hal_.send(line);
+    from = (uint16_t)(i + 1);
+  }
+  backlogLen_ = 0;
+  sdError_ = false;
 }
 
 void Device::simpleRow(const char* event, const char* detail) {
@@ -1040,12 +1099,24 @@ void Device::boot(uint8_t cause) {
   pelletMs_ = hal_.millis();
   haveRetrieve_ = false;
   jammed_ = false;
-  timeoutActive_ = false;
-  counters_[0] = counters_[1] = counters_[2] = 0;
   nextStatusMs_ = hal_.millis() + STATUS_EVERY_MS;
   inputLen_ = 0;
   inputOverflow_ = false;
-  sdError_ = !hal_.sdOk();
+  Readings readings;
+  hal_.read(readings);
+  battery_ = readings.battery;
+  loadCard(cause);
+}
+
+// Everything that comes from the card: the device's ID, its schedule, its run
+// and its counts. At boot, and again if the card wasn't readable then and has
+// come back (cause RESET_CARD). device_sim.SimDevice._load_card
+void Device::loadCard(uint8_t cause) {
+  cardLoaded_ = hal_.sdOk();
+  sdError_ = !cardLoaded_;
+  backlogLen_ = 0;          // rows from before belong to the file of the no-card defaults
+  timeoutActive_ = false;
+  counters_[0] = counters_[1] = counters_[2] = 0;
 
   const char* const managed[] = {"DEVICE.TXT", "RUN.TXT", "SCHED.TXT", "NEXT.TXT"};
   for (const char* name : managed) recover(name);
@@ -1066,12 +1137,19 @@ void Device::boot(uint8_t cause) {
   if (schedDefault_) strcpy(sched, "default");
   else sprintf(sched, "%08lx", (unsigned long)schedCrc_);
   snprintf(line, sizeof(line), "BOOT,fw=%s,reset=%s,clock=%s,sched=%s,run=%s", FIRMWARE,
-           RESETS[cause < 4 ? cause : 0], clockOk() ? "ok" : "unset", sched,
+           RESETS[cause < NUM_RESETS ? cause : 0], clockOk() ? "ok" : "unset", sched,
            activeRun() ? runId_ : "-");
   hal_.send(line);
-  snprintf(line, sizeof(line), "reset=%s;ratio counters reset", RESETS[cause < 4 ? cause : 0]);
+  snprintf(line, sizeof(line), "reset=%s;ratio counters reset", RESETS[cause < NUM_RESETS ? cause : 0]);
   simpleRow("boot", line);
   tick();
+}
+
+// The card is read once, at boot. If it wasn't ready then (a slow card, a
+// brown-out), the device is running the no-card defaults; the moment the card
+// answers, load what it holds, so the run carries on.
+void Device::cardCheck() {
+  if (!cardLoaded_ && hal_.sdOk()) loadCard(RESET_CARD);
 }
 
 // --- rules -----------------------------------------------------------------
@@ -1190,11 +1268,7 @@ void Device::enterPhase(uint16_t index, uint32_t start, const char* reason) {
   phaseIndex_ = index;
   phaseStart_ = start;
   havePhaseStart_ = true;
-  phaseRewards_ = phaseLeft_ = phaseRight_ = 0;
-  quotaUsed_ = 0;
-  haveQuotaPeriod_ = false;
-  counters_[0] = counters_[1] = counters_[2] = 0;
-  timeoutActive_ = false;
+  resetPhaseCounts();
   saveRun();
   char detail[96];
   if (reason && strcmp(reason, "catch-up") == 0) {
@@ -1335,6 +1409,13 @@ void Device::tick() {
   Rule rule;
   currentRule(rule);
   uint32_t now = hal_.millis();
+  // Over, so forget it: left set, the comparison would wrap after 25 days
+  // without a reward and read as a timeout again.
+  if (timeoutActive_ && (int32_t)(now - timeoutUntilMs_) >= 0) timeoutActive_ = false;
+  if (backlogLen_ && now - backlogMs_ >= BACKLOG_RETRY_MS) {
+    backlogMs_ = now;
+    flushBacklog();
+  }
   if (jammed_) {
     if (now - jamMs_ >= JAM_RETRY_MS) {
       jammed_ = false;
@@ -1347,6 +1428,7 @@ void Device::tick() {
     nextStatusMs_ += STATUS_EVERY_MS;
     Readings r;
     hal_.read(r);
+    battery_ = r.battery;
     char detail[64], b[16], t[16], h[16];
     snprintf(detail, sizeof(detail), "batt=%s;temp=%s;hum=%s", fixed(b, r.battery, 2),
              fixed(t, r.temperature, 1), fixed(h, r.humidity, 0));
@@ -1356,6 +1438,7 @@ void Device::tick() {
 
 void Device::loop() {
   hal_.feedWatchdog();
+  cardCheck();
   tick();
   handlePokes();
   pollInput();
@@ -1378,6 +1461,8 @@ void Device::showScreen() {
   s.clockOk = clockOk();
   s.jammed = jammed_;
   s.running = activeRun();
+  s.sdError = sdError_ || !hal_.sdOk();
+  s.battery = battery_;
   s.localSeconds = local();
   hal_.show(s);
 }
@@ -1410,6 +1495,7 @@ static bool startsWith(const char* s, const char* prefix) {
 // device_sim.SimDevice._command
 void Device::handleLine(const char* line) {
   char out[160];
+  cardCheck();
   if (strlen(line) > (size_t)MAX_COMMAND) return reply("ERR,TOO_LONG,");
   if (strcmp(line, "PING") == 0) {
     snprintf(out, sizeof(out), "PONG,id=%u,fw=%s,proto=%d", id_, FIRMWARE, PROTO);
@@ -1422,6 +1508,7 @@ void Device::handleLine(const char* line) {
     uint32_t id;
     if (!parseUint(line + 3, strlen(line + 3), 1, 999, id) || strlen(line + 3) > 3)
       return reply("ERR,BAD_ID,1-999");
+    if (!cardLoaded_) return reply("ERR,SD,the ID is kept on the card");
     setId((uint16_t)id);
     snprintf(out, sizeof(out), "ID,id=%u", id_);
     return reply(out);
@@ -1509,6 +1596,7 @@ void Device::status() {
   else strcpy(nextSched, "-");
   Readings r;
   hal_.read(r);
+  battery_ = r.battery;
   char b[16], t[16], h[16];
   bool isDepleted = depleted(rule);
   char out[MAX_COMMAND * 4];
@@ -1701,6 +1789,9 @@ void Device::runBegin(const char* arg) {
     nPhases_ = validateSchedule("SCHED.TXT", crc, phases) ? phases : 1;
     nextPresent_ = false;
   }
+  flushBacklog();
+  backlogLen_ = 0;          // what the card still refuses belonged to the old file
+  read_.active = false;     // and a READ still replaying the old file would land in the new run
   snprintf(runId_, sizeof(runId_), "%.8s", parts[0]);
   if (lights_) {            // a run starts with the lights as its cues leave them
     lights_ = false;
@@ -1709,23 +1800,21 @@ void Device::runBegin(const char* arg) {
   t0_ = (uint32_t)(utc + offsetMin_ * 60);
   ended_ = false;
   snprintf(file_, sizeof(file_), "%s.CSV", runId_);
-  char header[sizeof(HEADER) + 1];
-  sprintf(header, "%s\n", HEADER);
-  if (!hal_.fileWrite(file_, header, strlen(header))) sdError_ = true;
-  seq_ = left_ = right_ = pellets_ = 0;
   phaseIndex_ = 0;
   phaseStart_ = t0_;
   havePhaseStart_ = true;
-  phaseRewards_ = phaseLeft_ = phaseRight_ = 0;
-  quotaUsed_ = 0;
-  haveQuotaPeriod_ = false;
-  counters_[0] = counters_[1] = counters_[2] = 0;
-  timeoutActive_ = false;
+  resetPhaseCounts();
   loadPhase(0, phase_);
+  // A run this card already holds rows for (the device lost its place in it,
+  // and FNT started it again) carries on in the same file, with seq and the
+  // totals from its last row. The file is never started over: it may be the
+  // only copy. A new run finds no file, and restoreCounts writes its header.
+  bool resumed = hal_.fileSize(file_) > (int32_t)sizeof(HEADER);
+  restoreCounts();
   saveRun();
   char detail[80], when[32];
   iso(t0_, when);
-  snprintf(detail, sizeof(detail), "t0=%s;%s", when, phase_.name);
+  snprintf(detail, sizeof(detail), "t0=%s;%s%s", when, phase_.name, resumed ? ";resumed" : "");
   simpleRow("run_start", detail);
   snprintf(out, sizeof(out), "RUN,run=%s,file=%s,phase=0", runId_, file_);
   reply(out);
@@ -1835,7 +1924,7 @@ void Device::serviceRead(int maxRows) {
     char copy[MAX_COMMAND * 3];
     strcpy(copy, buf + 4);
     char* cols[ROW_COLUMNS];
-    if (splitRow(copy, cols) < 3) continue;
+    if (!goodRow(copy, cols)) continue;
     uint32_t seq = toUint(cols[2]);
     read_.last = seq;
     if (seq >= read_.from) {

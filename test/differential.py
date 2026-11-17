@@ -32,26 +32,26 @@ cues:
 phases:
   - name: Free
     until: {{at: "19:00"}}
-    all: {{active: none, free_feed: 1, refill_delay: 20s}}
+    rule: {{active: none, free_feed: 1, refill_delay: 20s}}
   - name: Shared
-    until: [{{rewards: 15}}, {{after: 1d}}]
-    all: {{active: both, ratio: 2, cue: {{reward: ding, counted: [click]}}}}
+    until: [{{rewards: 15, of: each}}, {{after: 1d}}]
+    rule: {{active: both, ratio: 2, cue: {{reward: ding, counted: [click]}}}}
   - name: PerPort
-    until: {{pokes: 40, side: left}}
-    all: {{active: both, ratio: 3, count: per_port, timeout: 20s, cue: {{timeout: [click]}}}}
+    until: {{pokes: 40, side: left, of: each}}
+    rule: {{active: both, ratio: 3, count: per_port, timeout: 20s, cue: {{timeout: [click]}}}}
   - name: PR
-    until: [{{rewards: 6}}, {{after: 12h}}]
-    all: {{ratio_kind: progressive, active: right, min_poke_ms: 2000}}
+    until: [{{rewards: 6, of: each}}, {{after: 12h}}]
+    rule: {{ratio_kind: progressive, active: right, min_poke_ms: 2000}}
   - name: Quota
     until: {{after: 2d}}
-    all: {{active: both, quota: 4, quota_period: 1h, cue: {{depleted: [click]}}}}
+    rule: {{active: both, quota: 4, quota_period: 1h, cue: {{depleted: [click]}}}}
     daily:
-      - {{from: "02:00", to: "04:00", all: {{free_feed: 1, refill_delay: 30s}}}}
+      - {{from: "02:00", to: "04:00", rule: {{free_feed: 1, refill_delay: 30s}}}}
   - name: Wait
-    until: [{{rewards: 1000, devices: all}}, {{after: 6h}}]
-    all: {{active: left, ratio: 4}}
+    until: [{{rewards: 1000, of: all}}, {{after: 6h}}]
+    rule: {{active: left, ratio: 4}}
   - name: Tail
-    all: {{active: left, reward: none, cue: {{reward: [click]}}}}
+    rule: {{active: left, reward: none, cue: {{reward: [click]}}}}
 """
 
 

@@ -82,6 +82,15 @@ Both expect an fnt checkout at `../fnt`, or wherever `FNT=` points.
   reboots, power cuts and FNT commands through both implementations. It
   requires their data files to match row for row.
 
+`fnt-fed3.ino` (the hardware: the motor, the RTC sanity check, the well's
+debounce, the display) isn't covered by either; that's what the bench
+checklist is for. CI (`.github/workflows/test.yml`) runs both and compiles the
+sketch for the board.
+
+**Power.** The firmware never sleeps, so on battery alone a FED3 runs for days,
+not weeks. Run long experiments on USB power. The screen shows the battery
+voltage and `LOW BATTERY` under 3.55 V.
+
 ## Serial access from WSL
 
 USB devices aren't visible inside WSL until they are attached with
@@ -117,10 +126,10 @@ Work through this on a spare FED3, not one in an experiment, before first use.
 Each step names what to send and what to expect; a serial monitor at any baud
 rate works.
 1. **Flash, then boot with a blank card.**
-   - Expect `BOOT,fw=3.0,reset=…,clock=…,sched=default,run=-`.
-   - The display shows `FED3 ID` / `FED001` for 3 seconds, then `FED001`,
-     `Default`, and the counts.
-2. **`PING`** → `PONG,id=1,fw=3.1,proto=3`. Then **`ID:7`** → `ID,id=7`; reboot and
+   - Expect `BOOT,fw=3.2,reset=…,clock=…,sched=default,run=-`.
+   - The display shows `FED3 ID` / `FED001` for 3 seconds, then `FED001`, the
+     battery voltage, `Default`, and the counts.
+2. **`PING`** → `PONG,id=1,fw=3.2,proto=3`. Then **`ID:7`** → `ID,id=7`; reboot and
    check `FED007` and `PONG,id=7`.
    - **The boot menu:** power-cycle, hold both pokes while `FED3 ID` shows.
      Right poke three times → `FED010`, then wait: `Saved`, a long beep, and
@@ -138,7 +147,9 @@ rate works.
 4. **Pokes.**
    - Poke left: a `ROW` with `event=poke,side=L,outcome=reward`.
    - About a second later a `dispense` row, and the pellet is in the well.
-   - Take it: a `retrieve` row with a sensible `retrieval_ms`.
+   - Take it: a `retrieve` row with a sensible `retrieval_ms` (it includes
+     the 200 ms the well must stay clear).
+   - Nudge a pellet in the well without taking it: no `retrieve` row.
    - Poke right: `outcome=inactive`.
 5. **A held beam.**
    - Block the left poke for over a minute.
@@ -172,11 +183,19 @@ rate works.
    - Mid-run, unplug USB and battery for a minute, then reconnect.
    - `BOOT,…,run=TEST1`.
    - `STATUS` shows the same phase and counts, and `seq` carries on.
-11. **Watchdog.** Hard to provoke on purpose. Note any `reset=watchdog` seen
+11. **The card.**
+   - Mid-run, pull the SD card. The display shows `SD CARD ERROR`; a poke
+     sends `ERR,SD,append failed`.
+   - Put it back within a few pokes: inside 10 seconds the rows it missed
+     arrive as `ROW` lines, `STATUS` shows `sd=ok`, and `seq` has no gap.
+   - Power-cycle with the card out: `STATUS` shows `sd=err`, `run=-`, and
+     `ID:5` is refused. Put the card in: `BOOT,…,reset=card,…,run=TEST1`
+     within 10 seconds, and `PING` still gives its own ID.
+12. **Watchdog.** Hard to provoke on purpose. Note any `reset=watchdog` seen
     during long runs, since each is a bug to report.
-12. **`READ:TEST1,1`**: the whole run replays, then
+13. **`READ:TEST1,1`**: the whole run replays, then
     `READ_END,run=TEST1,last=<seq>`.
-13. **Soak.** Leave it running a 24 h protocol with a daily window. At the end,
+14. **Soak.** Leave it running a 24 h protocol with a daily window. At the end,
     compare the card's `TEST1.CSV` with FNT's copy; they must be identical.
 
 ## Credits

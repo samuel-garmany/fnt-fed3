@@ -82,6 +82,18 @@ const int MOTOR_RPM = 250;               // only Stepper's minimum gap; STEP_US 
 const uint32_t STEP_US = 2100;
 const uint16_t MAX_TURNS = 30;           // then report a jam and retry later
 const uint32_t SD_RETRY_MS = 10000;
+// The well counts as empty only once its beam has stayed clear this long. A
+// pellet the animal nudges (or one settling as it lands) uncovers the beam for
+// a moment; taken as a retrieval, the next dispense would find that same
+// pellet at once and count it as a second one. retrieval_ms includes this wait.
+const uint32_t WELL_CLEAR_MS = 200;
+// A reading of the RTC this far from where the last one and millis() put it is
+// not believed until RTC_CONFIRM readings in a row agree with each other. A
+// glitch on the I2C bus comes back as any date at all, and a date in the
+// future would end every timed phase left in the schedule.
+const uint32_t RTC_TRUST_S = 5;
+const uint8_t RTC_CONFIRM = 3;
+const float LOW_BATTERY_V = 3.55f;       // as the classic library warns
 
 SdFat sd;
 RTC_PCF8523 rtc;
@@ -95,7 +107,11 @@ bool sdReady = false;
 uint32_t sdRetryMs = 0;
 bool rtcGood = false;
 bool rtcCached = false;
-uint32_t rtcBase = 0, rtcBaseMs = 0, rtcLast = 0;
+uint32_t rtcBase = 0, rtcBaseMs = 0, rtcReadMs = 0, rtcLast = 0;
+uint8_t rtcDoubts = 0;                   // readings in a row that disagree with the clock so far
+uint32_t rtcDoubt = 0, rtcDoubtMs = 0;   // the last such reading, and when
+bool wellSeen = false, wellClearing = false;
+uint32_t wellClearMs = 0;
 uint32_t rngState = 1;
 
 // --- pokes: edges timestamped in interrupts -------------------------------
@@ -313,10 +329,15 @@ struct Drawn {
   uint16_t id;
   char phase[MAX_NAME + 1];
   uint32_t left, right, pellets, minute;
-  bool clockOk, jammed, running;
+  bool clockOk, jammed, running, sdError;
+  uint16_t tenths;      // battery, in tenths of a volt
 } drawn;
 bool everDrawn = false;
 uint32_t lastDrawMs = 0;
+
+uint16_t batteryTenths(float volts) {
+  return volts > 0 ? (uint16_t)(volts * 10.0f + 0.5f) : 0;   // 0: not read (or nan)
+}
 
 void draw(const Screen& s) {
   display.clearDisplay();
@@ -326,6 +347,12 @@ void draw(const Screen& s) {
   display.setCursor(4, 16);
   snprintf(line, sizeof(line), "FED%03u", s.id);   // its ID, as FNT and the protocol write it
   display.print(line);
+  uint16_t tenths = batteryTenths(s.battery);
+  if (tenths) {
+    display.setCursor(122, 16);
+    snprintf(line, sizeof(line), "%u.%uV", tenths / 10, tenths % 10);
+    display.print(line);
+  }
   display.setCursor(4, 38);
   snprintf(line, sizeof(line), "%.14s", s.phase);
   display.print(line);
@@ -339,7 +366,11 @@ void draw(const Screen& s) {
   snprintf(line, sizeof(line), "Pellets: %lu", (unsigned long)s.pellets);
   display.print(line);
   display.setCursor(4, 120);
-  display.print(s.jammed ? "JAM - retrying" : s.running ? "running" : "idle");
+  // The worst first: without the card nothing is recorded, and the device is
+  // on its no-card defaults rather than the run.
+  bool low = tenths && s.battery < LOW_BATTERY_V;
+  display.print(s.sdError ? "SD CARD ERROR" : s.jammed ? "JAM - retrying"
+                : low ? "LOW BATTERY" : s.running ? "running" : "idle");
   display.setCursor(4, 140);
   if (s.clockOk) {
     DateTime t(s.localSeconds);
@@ -473,13 +504,42 @@ uint32_t ArduinoHal::millis() { return ::millis(); }
 
 bool ArduinoHal::rtcValid() { return rtcGood; }
 
-// Read the RTC over I2C once a second and count milliseconds in between.
+// Read the RTC over I2C once a second and count milliseconds in between. A
+// reading is checked against the clock so far (RTC_TRUST_S).
 uint32_t ArduinoHal::rtcNow() {
   uint32_t now = ::millis();
-  if (!rtcCached || now - rtcBaseMs >= 1000) {
-    rtcBase = rtc.now().unixtime();
-    rtcBaseMs = now;
+  if (!rtcCached) {
+    // Nothing to check against yet (boot, or the clock was just set): take a
+    // reading that the next one agrees with.
+    uint32_t first = rtc.now().unixtime();
+    for (uint8_t tries = 0; tries < 4; tries++) {
+      uint32_t again = rtc.now().unixtime();
+      bool agree = again - first <= 1;
+      first = again;
+      if (agree) break;
+    }
+    rtcBase = first;
+    rtcBaseMs = rtcReadMs = now;
     rtcCached = true;
+    rtcDoubts = 0;
+  } else if (now - rtcReadMs >= 1000) {
+    rtcReadMs = now;
+    uint32_t fresh = rtc.now().unixtime();
+    uint32_t expected = rtcBase + (now - rtcBaseMs) / 1000;
+    uint32_t off = fresh > expected ? fresh - expected : expected - fresh;
+    if (off > RTC_TRUST_S) {
+      // Believed only if the readings after it tell the same time.
+      uint32_t follows = rtcDoubt + (now - rtcDoubtMs) / 1000;
+      uint32_t apart = fresh > follows ? fresh - follows : follows - fresh;
+      rtcDoubts = (rtcDoubts && apart <= RTC_TRUST_S) ? rtcDoubts + 1 : 1;
+      rtcDoubt = fresh;
+      rtcDoubtMs = now;
+    }
+    if (off <= RTC_TRUST_S || rtcDoubts >= RTC_CONFIRM) {
+      rtcBase = fresh;
+      rtcBaseMs = now;
+      rtcDoubts = 0;
+    }
   }
   uint32_t value = rtcBase + (now - rtcBaseMs) / 1000;
   if (value < rtcLast && rtcLast - value < 2) value = rtcLast;   // never step back a second
@@ -580,7 +640,21 @@ bool ArduinoHal::pokeEvent(PokeEvent& event) {
   return have;
 }
 
-bool ArduinoHal::wellFull() { return wellDetected(); }
+// Full the moment the beam is broken; empty once it has stayed clear for
+// WELL_CLEAR_MS.
+bool ArduinoHal::wellFull() {
+  uint32_t now = ::millis();
+  if (wellDetected()) {
+    wellSeen = true;
+    wellClearing = false;
+  } else if (wellSeen && !wellClearing) {
+    wellClearing = true;
+    wellClearMs = now;
+  } else if (wellSeen && now - wellClearMs >= WELL_CLEAR_MS) {
+    wellSeen = wellClearing = false;
+  }
+  return wellSeen;
+}
 
 void ArduinoHal::startDispense() {
   memset(&motor, 0, sizeof(motor));
@@ -690,7 +764,8 @@ void ArduinoHal::show(const Screen& s) {
   bool changed = !everDrawn || s.id != drawn.id || strcmp(s.phase, drawn.phase) != 0 ||
                  s.left != drawn.left || s.right != drawn.right || s.pellets != drawn.pellets ||
                  minute != drawn.minute || s.clockOk != drawn.clockOk ||
-                 s.jammed != drawn.jammed || s.running != drawn.running;
+                 s.jammed != drawn.jammed || s.running != drawn.running ||
+                 s.sdError != drawn.sdError || batteryTenths(s.battery) != drawn.tenths;
   // At most twice a second: a redraw takes tens of milliseconds.
   if (!changed || (everDrawn && now - lastDrawMs < 500)) return;
   drawn.id = s.id;
@@ -702,6 +777,8 @@ void ArduinoHal::show(const Screen& s) {
   drawn.clockOk = s.clockOk;
   drawn.jammed = s.jammed;
   drawn.running = s.running;
+  drawn.sdError = s.sdError;
+  drawn.tenths = batteryTenths(s.battery);
   everDrawn = true;
   lastDrawMs = now;
   draw(s);

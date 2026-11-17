@@ -1,0 +1,42 @@
+# The device core against FNT's simulator, and the sketch built for the board.
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  core:
+    name: Device core on a PC
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: fnt-fed3
+      # The simulator and its tests are the spec, and they live in fnt.
+      - uses: actions/checkout@v4
+        with:
+          repository: calebvogt/fnt
+          path: fnt
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pyyaml pyserial
+      - name: FNT's device and engine tests, on the C++ core
+        run: make -C fnt-fed3/test test FNT=$GITHUB_WORKSPACE/fnt
+      - name: Random scenarios through the core and the simulator
+        run: FNT=$GITHUB_WORKSPACE/fnt python3 fnt-fed3/test/differential.py
+
+  sketch:
+    name: Sketch for the Feather M0
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      # Arduino needs the sketch in a folder named after its .ino.
+      - uses: actions/checkout@v4
+        with:
+          path: fnt-fed3
+      - uses: arduino/setup-arduino-cli@v2
+      # Platform and library versions come from sketch.yaml.
+      - run: arduino-cli compile --warnings default fnt-fed3

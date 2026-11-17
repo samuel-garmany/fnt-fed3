@@ -173,7 +173,9 @@ bool parseClock(const char* text, size_t len, uint16_t& minutes);
 // test/host_hal.cpp with a simulated clock, motor and SD card.
 // ===========================================================================
 
-enum ResetCause : uint8_t { RESET_POWER, RESET_WATCHDOG, RESET_SOFTWARE, RESET_EXTERNAL };
+// RESET_CARD isn't a reset: the card wasn't readable at power-on, and the
+// device has now loaded its state from it (Device::cardCheck).
+enum ResetCause : uint8_t { RESET_POWER, RESET_WATCHDOG, RESET_SOFTWARE, RESET_EXTERNAL, RESET_CARD };
 enum DispenseEvent : uint8_t { DISPENSE_NONE, DISPENSE_LANDED, DISPENSE_JAMMED };
 enum PokeEdge : uint8_t { EDGE_BREAK, EDGE_RELEASE };
 
@@ -193,6 +195,8 @@ struct Screen {
   const char* phase;
   uint32_t left, right, pellets;
   bool clockOk, jammed, running;
+  bool sdError;
+  float battery;        // volts, as last read (at boot, hourly and on STATUS)
   uint32_t localSeconds;
 };
 
@@ -242,7 +246,7 @@ class Hal {
 // The device
 // ===========================================================================
 
-const char* const FIRMWARE = "3.1";
+const char* const FIRMWARE = "3.2";
 const int PROTO = 3;
 const int MAX_COMMAND = 128;
 const uint32_t JAM_RETRY_MS = 600000UL;
@@ -251,6 +255,10 @@ const uint32_t MAX_HOLD_MS = 60000UL;
 const uint32_t STAGING_TIMEOUT_MS = 10000UL;
 const uint32_t TIME_JUMP_LIMIT_S = 600;
 const uint32_t CATCH_UP_S = 60;
+// Rows the card refused are kept here and written when it answers again, so
+// a card that drops out for a few seconds loses nothing.
+const uint32_t BACKLOG_BYTES = 1024;
+const uint32_t BACKLOG_RETRY_MS = 1000;
 
 enum Outcome : uint8_t {
   O_REWARD, O_COUNTED, O_INACTIVE, O_TIMEOUT, O_SHORT, O_PELLET_IN_WELL, O_DEPLETED
@@ -348,6 +356,11 @@ class Device {
   uint16_t inputLen_ = 0;
   bool inputOverflow_ = false;
   bool sdError_ = false;
+  bool cardLoaded_ = false;   // the state here came from the card, not the no-card defaults
+  char backlog_[BACKLOG_BYTES];
+  uint16_t backlogLen_ = 0;
+  uint32_t backlogMs_ = 0;
+  float battery_ = 0;
 
   // Clock
   bool clockOk();
@@ -365,7 +378,11 @@ class Device {
   bool validateSchedule(const char* name, uint32_t& crc, uint16_t& phases);
   bool loadPhase(uint16_t index, Phase& out);
   void loadSchedule();
+  void loadCard(uint8_t cause);
+  void cardCheck();
   void restoreCounts();
+  void resetPhaseCounts();
+  void flushBacklog();
   void row(const char* event, const char* side, const char* outcome, int32_t phase,
            const char* retrievalMs, const char* pokeMs, const char* detail,
            uint32_t atLocal, uint32_t atMs, bool atClockOk);
