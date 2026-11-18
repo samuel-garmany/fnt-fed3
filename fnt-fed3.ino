@@ -611,10 +611,15 @@ void ArduinoHal::send(const char* line) {
   // would block for the USB timeout. The rows are on the card regardless.
   if (!Serial.dtr()) return;
   // One write per line: each write can wait out the USB timeout on its own.
-  static char out[MAX_COMMAND * 4 + 2];
+  static char out[MAX_COMMAND * 4 + 3];
   size_t n = strlen(line);
-  if (n > sizeof(out) - 2) n = sizeof(out) - 2;
+  if (n > sizeof(out) - 3) n = sizeof(out) - 3;
   memcpy(out, line, n);
+  // A write that fills its last 64-byte USB packet isn't followed by a short
+  // one, and Windows holds it until the next write arrives: a STATUS of
+  // exactly 384 bytes went unanswered until FNT sent something else. A '\r'
+  // (which FNT strips) makes the last packet short.
+  if ((n + 1) % 64 == 0) out[n++] = '\r';
   out[n] = '\n';
   Serial.write(out, n + 1);
 }
